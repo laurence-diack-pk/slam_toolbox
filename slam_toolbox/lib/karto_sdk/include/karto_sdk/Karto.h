@@ -37,6 +37,7 @@
 #include <assert.h>
 #include <string.h>
 #include <boost/thread.hpp>
+#include <Eigen/Core>
 
 #include <boost/serialization/base_object.hpp>
 #include <boost/serialization/nvp.hpp>
@@ -7164,7 +7165,18 @@ namespace karto
 	  }
 
   // @endcond
-
+  struct GPSMeasurement 
+  {
+    double x;
+    double y;
+    double heading;
+    Eigen::Matrix3d covariance;
+    bool valid{false};
+    
+    GPSMeasurement() : x(0.0), y(0.0), heading(0.0), valid(false) {
+      covariance.setZero();
+    }
+  };
   /*@}*/
 };  // namespace karto
 

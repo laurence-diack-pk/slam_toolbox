@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.5)
 project(slam_toolbox)
 
 add_compile_options(-std=c++17)
-set(CMAKE_BUILD_TYPE Release) #None, Debug, Release, RelWithDebInfo, MinSizeRel
+set(CMAKE_BUILD_TYPE RelWithDebInfo) #None, Debug, Release, RelWithDebInfo, MinSizeRel
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/CMake/")
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/karto_sdk/cmake)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fpermissive -std=c++17")
@@ -117,6 +117,11 @@ target_link_libraries(lifelong_slam_toolbox toolbox_common kartoSlamToolbox ${ca
 add_executable(lifelong_slam_toolbox_node src/experimental/slam_toolbox_lifelong_node.cpp )
 target_link_libraries(lifelong_slam_toolbox_node lifelong_slam_toolbox)
 
+add_library(async_gps_slam_toolbox src/slam_toolbox_async_gps.cpp)
+target_link_libraries(async_gps_slam_toolbox toolbox_common kartoSlamToolbox ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+add_executable(async_gps_slam_toolbox_node src/slam_toolbox_async_gps_node.cpp )
+target_link_libraries(async_gps_slam_toolbox_node async_gps_slam_toolbox)
+
 #### Merging maps tool
 add_executable(merge_maps_kinematic src/merge_maps_kinematic.cpp)
 target_link_libraries(merge_maps_kinematic toolbox_common)
@@ -132,6 +137,8 @@ target_link_libraries(merge_maps_kinematic toolbox_common)
 install(TARGETS toolbox_common
                 async_slam_toolbox
                 async_slam_toolbox_node
+                async_gps_slam_toolbox
+                async_gps_slam_toolbox_node
                 sync_slam_toolbox
                 sync_slam_toolbox_node
                 localization_slam_toolbox

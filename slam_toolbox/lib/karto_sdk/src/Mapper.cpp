@@ -2716,84 +2716,106 @@ namespace karto
     return true;
   }
 
-  kt_bool Mapper::Process(LocalizedRangeScan* pScan, Matrix3 * covariance)
+  // Original Process method implementation
+  kt_bool Mapper::Process(LocalizedRangeScan* pScan, Matrix3* covariance)
   {
-	  if (pScan != NULL)
-	  {
-		  karto::LaserRangeFinder* pLaserRangeFinder = pScan->GetLaserRangeFinder();
+      // Call the new implementation with GPS as null
+      return Process(pScan, covariance, nullptr);
+  }
 
-		  // validate scan
-		  if (pLaserRangeFinder == NULL || pScan == NULL || pLaserRangeFinder->Validate(pScan) == false)
-		  {
-			  return false;
-		  }
+  kt_bool Mapper::Process(LocalizedRangeScan* pScan, Matrix3* covariance, const GPSMeasurement* gps) {
+    if (pScan == NULL) {
+        return false;
+    }
+    // Get laser range finder and validate scan
+    karto::LaserRangeFinder* pLaserRangeFinder = pScan->GetLaserRangeFinder();
+    if (pLaserRangeFinder == NULL || pLaserRangeFinder->Validate(pScan) == false) {
+        return false;
+    }
+    // Initialize mapper if needed
+    if (!m_Initialized) {
+        Initialize(pLaserRangeFinder->GetRangeThreshold());
+    }
+    // Get last scan from same sensor
+    LocalizedRangeScan* pLastScan = m_pMapperSensorManager->GetLastScan(pScan->GetSensorName());
+    // Initial pose estimation based on previous correction
+    if (pLastScan != NULL) {
+        Transform lastTransform(pLastScan->GetOdometricPose(), pLastScan->GetCorrectedPose());
+        pScan->SetCorrectedPose(lastTransform.TransformPose(pScan->GetOdometricPose()));
+    }
+    // Check if robot has moved enough to process this scan
+    if (!HasMovedEnough(pScan, pLastScan)) {
+        return false;
+    }
+    // Initialize covariance matrix
+    Matrix3 cov;
+    cov.SetToIdentity();
 
-		  if (m_Initialized == false)
-		  {
-			  // initialize mapper with range threshold from device
-			  Initialize(pLaserRangeFinder->GetRangeThreshold());
-		  }
+    // GPS-based pose correction
+    bool gpsValid = false;
+    if (gps && gps->valid) {
+        // Create new pose with both GPS position and heading
+        Pose2 gpsPose(gps->x, gps->y, gps->heading);
+        pScan->SetCorrectedPose(gpsPose);
 
-		  // get last scan
-		  LocalizedRangeScan* pLastScan = m_pMapperSensorManager->GetLastScan(pScan->GetSensorName());
+        // Update covariance using full GPS covariance
+        if (covariance) {
+            // Copy full 3x3 GPS covariance including heading
+            cov(0, 0) = gps->covariance(0,0);
+            cov(0, 1) = gps->covariance(0,1);
+            cov(0, 2) = gps->covariance(0,2);
+            cov(1, 0) = gps->covariance(1,0);
+            cov(1, 1) = gps->covariance(1,1);
+            cov(1, 2) = gps->covariance(1,2);
+            cov(2, 0) = gps->covariance(2,0);
+            cov(2, 1) = gps->covariance(2,1);
+            cov(2, 2) = gps->covariance(2,2) * 10;
+            *covariance = cov;
+        }
+        gpsValid = true;
+        std::cout << "Info: Using GPS update" << std::endl;
+    }
 
-		  // update scans corrected pose based on last correction
-		  if (pLastScan != NULL)
-		  {
-			  Transform lastTransform(pLastScan->GetOdometricPose(), pLastScan->GetCorrectedPose());
-			  pScan->SetCorrectedPose(lastTransform.TransformPose(pScan->GetOdometricPose()));
-		  }
+    // Perform scan matching if enabled and no valid GPS update
+    if (!gpsValid && m_pUseScanMatching->GetValue() && pLastScan != NULL) {
+        Pose2 bestPose;
+        // Get scans for matching
+        LocalizedRangeScanVector runningScanBuffer =
+            m_pMapperSensorManager->GetRunningScans(pScan->GetSensorName());
+        // Perform scan matching
+        if (m_pSequentialScanMatcher->MatchScan(pScan,
+                                              runningScanBuffer,
+                                              bestPose,
+                                              cov)) {
+            pScan->SetCorrectedPose(bestPose);
+            if (covariance) {
+                *covariance = cov;
+            }
+            std::cout << "Info: Using scan matching update" << std::endl;
+        } else {
+            std::cout << "Error: Scan matching failed" << std::endl;
+        }
+    }
 
-		  // test if scan is outside minimum boundary or if heading is larger then minimum heading
-		  if (!HasMovedEnough(pScan, pLastScan))
-		  {
-			  return false;
-		  }
-
-		  Matrix3 cov;
-		  cov.SetToIdentity();
-
-		  // correct scan (if not first scan)
-		  if (m_pUseScanMatching->GetValue() && pLastScan != NULL)
-		  {
-			  Pose2 bestPose;
-			  m_pSequentialScanMatcher->MatchScan(pScan,
-					  m_pMapperSensorManager->GetRunningScans(pScan->GetSensorName()),
-					  bestPose,
-					  cov);
-			  pScan->SetSensorPose(bestPose);
-			  if (covariance) {
-				  *covariance = cov;
-			  }
-		  }
-
-		  // add scan to buffer and assign id
-		  m_pMapperSensorManager->AddScan(pScan);
-
-		  if (m_pUseScanMatching->GetValue())
-		  {
-			  // add to graph
-			  m_pGraph->AddVertex(pScan);
-			  m_pGraph->AddEdges(pScan, cov);
-
-			  m_pMapperSensorManager->AddRunningScan(pScan);
-
-			  if (m_pDoLoopClosing->GetValue())
-			  {
-				  std::vector<Name> deviceNames = m_pMapperSensorManager->GetSensorNames();
-				  const_forEach(std::vector<Name>, &deviceNames)
-				  {
-					  m_pGraph->TryCloseLoop(pScan, *iter);
-				  }
-			  }
-		  }
-
-		  m_pMapperSensorManager->SetLastScan(pScan);
-
-		  return true;
-	  }
-
-	  return false;
+    // add scan to buffer and assign id
+    m_pMapperSensorManager->AddScan(pScan);
+    if (m_pUseScanMatching->GetValue())
+    {
+        // add to graph
+        m_pGraph->AddVertex(pScan);
+        m_pGraph->AddEdges(pScan, cov);
+        m_pMapperSensorManager->AddRunningScan(pScan);
+        if (m_pDoLoopClosing->GetValue())
+        {
+            std::vector<Name> deviceNames = m_pMapperSensorManager->GetSensorNames();
+            const_forEach(std::vector<Name>, &deviceNames)
+            {
+                m_pGraph->TryCloseLoop(pScan, *iter);
+            }
+        }
+    }
+    m_pMapperSensorManager->SetLastScan(pScan);
+    return true;
   }
 
   kt_bool Mapper::ProcessAgainstNodesNearBy(LocalizedRangeScan* pScan, kt_bool addScanToLocalizationBuffer, Matrix3 * covariance)

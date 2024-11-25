@@ -1006,6 +1006,14 @@ namespace karto
     {
     }
 
+    virtual void AddGPSConstraint(kt_int32s node_id, double x, double y, const Eigen::Matrix2d& covariance)
+    {
+    }
+
+    virtual void RemoveGPSConstraint(kt_int32s node_id)
+    {
+    }
+
     /**
      * Resets the solver
      */
@@ -1983,7 +1991,12 @@ namespace karto
      *
      * @return true if the scan was added successfully, false otherwise
      */
-    virtual kt_bool Process(LocalizedRangeScan * pScan, Matrix3 * covariance = nullptr);
+    // Original function signature remains unchanged
+    virtual kt_bool Process(LocalizedRangeScan* pScan, Matrix3* covariance);
+    
+    // New overload with GPS data
+    virtual kt_bool Process(LocalizedRangeScan* pScan, Matrix3* covariance, const GPSMeasurement* gps);
+
 
     /**
      * Process an Object
