@@ -19,7 +19,7 @@ CeresSolver::CeresSolver() :
  nodes_(new std::unordered_map<int, Eigen::Vector3d>()),
   blocks_(new std::unordered_map<std::size_t,
     ceres::ResidualBlockId>()),
-  problem_(NULL), was_constant_set_(false)
+  problem_(NULL), was_constant_set_(false), gps_factor_weight_(1000.0), interpolation_factor_(0.3)
 /*****************************************************************************/
 {
   ros::NodeHandle nh("~");
@@ -34,6 +34,7 @@ CeresSolver::CeresSolver() :
   nh.getParam("debug_logging", debug_logging_);
 
   corrections_.clear();
+  nodes_with_gps_.clear();
   first_node_ = nodes_->end();
 
   // formulate problem
@@ -243,112 +244,189 @@ void CeresSolver::Clear()
 void CeresSolver::Reset()
 /*****************************************************************************/
 {
-  boost::mutex::scoped_lock lock(nodes_mutex_);
+    boost::mutex::scoped_lock lock(nodes_mutex_);
+    
+    nodes_with_gps_.clear();
+    
+    // Rest of existing Reset code...
+    corrections_.clear();
+    was_constant_set_ = false;
 
-  corrections_.clear();
-  was_constant_set_ = false;
+    if (problem_) {
+        delete problem_;
+    }
+    if (nodes_) {
+        delete nodes_;
+    }
+    if (blocks_) {
+        delete blocks_;
+    }
 
-  if (problem_)
-  {
-    delete problem_;
-  }
-
-  if (nodes_)
-  {
-    delete nodes_;
-  }
-
-  if (blocks_)
-  {
-    delete blocks_;
-  }
-
-  nodes_ = new std::unordered_map<int, Eigen::Vector3d>();
-  blocks_ = new std::unordered_map<std::size_t, ceres::ResidualBlockId>();
-  problem_ = new ceres::Problem(options_problem_);
-  first_node_ = nodes_->end();
-
-  angle_local_parameterization_ = AngleLocalParameterization::Create();
+    nodes_ = new std::unordered_map<int, Eigen::Vector3d>();
+    blocks_ = new std::unordered_map<std::size_t, ceres::ResidualBlockId>();
+    problem_ = new ceres::Problem(options_problem_);
+    first_node_ = nodes_->end();
 }
 
 /*****************************************************************************/
 void CeresSolver::AddNode(karto::Vertex<karto::LocalizedRangeScan>* pVertex)
 /*****************************************************************************/
 {
-  // store nodes
-  if (!pVertex)
-  {
-    return;
-  }
-  
-  karto::Pose2 pose = pVertex->GetObject()->GetCorrectedPose();
-  Eigen::Vector3d pose2d(pose.GetX(), pose.GetY(), pose.GetHeading());
+    if (!pVertex)
+    {
+        return;
+    }
 
-  const int id = pVertex->GetObject()->GetUniqueId();
+    karto::LocalizedRangeScan* scan = pVertex->GetObject();
+    karto::Pose2 pose = scan->GetCorrectedPose();
+    Eigen::Vector3d pose2d(pose.GetX(), pose.GetY(), pose.GetHeading());
+    const int id = scan->GetUniqueId();
 
-  boost::mutex::scoped_lock lock(nodes_mutex_);
-  nodes_->insert(std::pair<int,Eigen::Vector3d>(id,pose2d));
+    boost::mutex::scoped_lock lock(nodes_mutex_);
+    nodes_->insert(std::pair<int,Eigen::Vector3d>(id, pose2d));
 
-  if (nodes_->size() == 1)
-  {
-    first_node_ = nodes_->find(id);
-  }
+    if (nodes_->size() == 1)
+    {
+        first_node_ = nodes_->find(id);
+    }
 }
+
+void CeresSolver::AddInterpolationConstraints(int source_id, int target_id)
+{
+    GraphIterator source_it = nodes_->find(source_id);
+    GraphIterator target_it = nodes_->find(target_id);
+    
+    if (source_it == nodes_->end() || target_it == nodes_->end()) return;
+    
+    // Calculate number of nodes between source and target
+    int node_count = target_id - source_id;
+    if (node_count <= 1) return;
+    
+    // For each intermediate node
+    for (int i = 1; i < node_count; i++) {
+        int curr_id = source_id + i;
+        GraphIterator curr_it = nodes_->find(curr_id);
+        if (curr_it == nodes_->end()) continue;
+        
+        // Create interpolation factor (0 to 1)
+        double factor = static_cast<double>(i) / node_count;
+        
+        // Add soft constraint to interpolate between GPS readings
+        ceres::CostFunction* interpolation_fn =
+            new ceres::AutoDiffCostFunction<InterpolationErrorTerm, 3, 1, 1, 1, 1, 1, 1>(
+                new InterpolationErrorTerm(factor, interpolation_factor_));
+                
+        ceres::ResidualBlockId block = problem_->AddResidualBlock(
+            interpolation_fn,
+            loss_function_,  // Use regular loss function for smooth transitions
+            &source_it->second(0), &source_it->second(1), &source_it->second(2),
+            &curr_it->second(0), &curr_it->second(1), &curr_it->second(2));
+            
+        blocks_->insert(std::pair<std::size_t, ceres::ResidualBlockId>(
+            GetHash(source_id, curr_id), block));
+    }
+}
+
 
 /*****************************************************************************/
 void CeresSolver::AddConstraint(karto::Edge<karto::LocalizedRangeScan>* pEdge)
 /*****************************************************************************/
 {
-  // get IDs in graph for this edge
-  boost::mutex::scoped_lock lock(nodes_mutex_);
+    boost::mutex::scoped_lock lock(nodes_mutex_);
+    if (!pEdge) {
+        return;
+    }
 
-  if (!pEdge)
-  {
-    return;
-  }
+    const int node1 = pEdge->GetSource()->GetObject()->GetUniqueId();
+    GraphIterator node1it = nodes_->find(node1);
+    const int node2 = pEdge->GetTarget()->GetObject()->GetUniqueId();
+    GraphIterator node2it = nodes_->find(node2);
 
-  const int node1 = pEdge->GetSource()->GetObject()->GetUniqueId();
-  GraphIterator node1it = nodes_->find(node1);
-  const int node2 = pEdge->GetTarget()->GetObject()->GetUniqueId();
-  GraphIterator node2it = nodes_->find(node2);
+    if (node1it == nodes_->end() || node2it == nodes_->end()) {
+        ROS_WARN("CeresSolver: Failed to add constraint, could not find nodes.");
+        return;
+    }
 
-  if (node1it == nodes_->end() || 
-      node2it == nodes_->end() || node1it == node2it)
-  {
-    ROS_WARN("CeresSolver: Failed to add constraint, could not find nodes.");
-    return;
-  }
+    karto::LinkInfo* pLinkInfo = (karto::LinkInfo*)(pEdge->GetLabel());
+    karto::Pose2 diff = pLinkInfo->GetPoseDifference();
 
-  // extract transformation
-  karto::LinkInfo* pLinkInfo = (karto::LinkInfo*)(pEdge->GetLabel());
-  karto::Pose2 diff = pLinkInfo->GetPoseDifference();
-  Eigen::Vector3d pose2d(diff.GetX(), diff.GetY(), diff.GetHeading());
+    // Extract transformation
+    karto::Matrix3 precisionMatrix = pLinkInfo->GetCovariance().Inverse();
+    Eigen::Matrix3d information;
+    information(0, 0) = precisionMatrix(0, 0);
+    information(0, 1) = information(1, 0) = precisionMatrix(0, 1);
+    information(0, 2) = information(2, 0) = precisionMatrix(0, 2);
+    information(1, 1) = precisionMatrix(1, 1);
+    information(1, 2) = information(2, 1) = precisionMatrix(1, 2);
+    information(2, 2) = precisionMatrix(2, 2);
+    Eigen::Matrix3d sqrt_information = information.llt().matrixU();
 
-  karto::Matrix3 precisionMatrix = pLinkInfo->GetCovariance().Inverse();
-  Eigen::Matrix3d information;
-  information(0, 0) = precisionMatrix(0, 0);
-  information(0, 1) = information(1, 0) = precisionMatrix(0, 1);
-  information(0, 2) = information(2, 0) = precisionMatrix(0, 2);
-  information(1, 1) = precisionMatrix(1, 1);
-  information(1, 2) = information(2, 1) = precisionMatrix(1, 2);
-  information(2, 2) = precisionMatrix(2, 2);
-  Eigen::Matrix3d sqrt_information = information.llt().matrixU();
+    ceres::ResidualBlockId block;
+    
+    if (node1 == node2) {  // GPS constraint
+        nodes_with_gps_.insert(node1);
+        
+        // Find previous GPS node
+        auto curr_it = nodes_with_gps_.find(node1);
+        if (curr_it != nodes_with_gps_.begin()) {
+            auto prev_gps = std::prev(curr_it);
+            AddInterpolationConstraints(*prev_gps, node1);
+        }
+        
+        // Find next GPS node
+        auto next_it = std::next(curr_it);
+        if (next_it != nodes_with_gps_.end()) {
+            AddInterpolationConstraints(node1, *next_it);
+        }
+        
+        // Add the actual GPS constraint
+        karto::LinkInfo* pLinkInfo = (karto::LinkInfo*)(pEdge->GetLabel());
+        karto::Pose2 diff = pLinkInfo->GetPoseDifference();
+        
+        karto::Matrix3 precisionMatrix = pLinkInfo->GetCovariance().Inverse();
+        Eigen::Matrix3d information;
+        information(0, 0) = precisionMatrix(0, 0);
+        information(0, 1) = information(1, 0) = precisionMatrix(0, 1);
+        information(0, 2) = information(2, 0) = precisionMatrix(0, 2);
+        information(1, 1) = precisionMatrix(1, 1);
+        information(1, 2) = information(2, 1) = precisionMatrix(1, 2);
+        information(2, 2) = precisionMatrix(2, 2);
+        Eigen::Matrix3d sqrt_information = information.llt().matrixU();
 
-  // populate residual and parameterization for heading normalization
-  ceres::CostFunction* cost_function = PoseGraph2dErrorTerm::Create(pose2d(0), 
-    pose2d(1), pose2d(2), sqrt_information);
-  ceres::ResidualBlockId block = problem_->AddResidualBlock(
-   cost_function, loss_function_, 
-   &node1it->second(0), &node1it->second(1), &node1it->second(2),
-   &node2it->second(0), &node2it->second(1), &node2it->second(2));
-  problem_->SetParameterization(&node1it->second(2),
-    angle_local_parameterization_);
-  problem_->SetParameterization(&node2it->second(2),
-    angle_local_parameterization_);
+        ceres::CostFunction* gps_function =
+            new ceres::AutoDiffCostFunction<GPSPoseErrorTerm, 3, 1, 1, 1>(
+                new GPSPoseErrorTerm(diff.GetX(), diff.GetY(), diff.GetHeading(), 
+                                   sqrt_information));
 
-  blocks_->insert(std::pair<std::size_t, ceres::ResidualBlockId>(
-    GetHash(node1, node2), block));
-  return;
+        ceres::ResidualBlockId block = problem_->AddResidualBlock(
+            gps_function,
+            nullptr,  // No loss function for GPS
+            &node1it->second(0),
+            &node1it->second(1),
+            &node1it->second(2));
+
+        problem_->SetParameterization(&node1it->second(2), angle_local_parameterization_);
+        
+        blocks_->insert(std::pair<std::size_t, ceres::ResidualBlockId>(
+            GetHash(node1, node1), block));
+    }
+    else  // Regular scan-matching constraint
+    {
+        ceres::CostFunction* cost_function = PoseGraph2dErrorTerm::Create(
+            diff.GetX(), diff.GetY(), diff.GetHeading(), sqrt_information);
+
+        block = problem_->AddResidualBlock(
+            cost_function,
+            loss_function_,
+            &node1it->second(0), &node1it->second(1), &node1it->second(2),
+            &node2it->second(0), &node2it->second(1), &node2it->second(2));
+
+        problem_->SetParameterization(&node1it->second(2), angle_local_parameterization_);
+        problem_->SetParameterization(&node2it->second(2), angle_local_parameterization_);
+    }
+
+    blocks_->insert(std::pair<std::size_t, ceres::ResidualBlockId>(
+        GetHash(node1, node2), block));
 }
 
 /*****************************************************************************/
@@ -356,6 +434,10 @@ void CeresSolver::RemoveNode(kt_int32s id)
 /*****************************************************************************/
 {
   boost::mutex::scoped_lock lock(nodes_mutex_);
+  
+  // Remove from GPS tracking if it had GPS
+    nodes_with_gps_.erase(id);
+
   GraphIterator nodeit = nodes_->find(id);
   if (nodeit != nodes_->end())
   {
@@ -368,15 +450,7 @@ void CeresSolver::RemoveNode(kt_int32s id)
       problem_->RemoveParameterBlock(&nodeit->second(2));
       ROS_DEBUG("RemoveNode: Removed node id %d", nodeit->first);
     }
-    else
-    {
-      ROS_DEBUG("RemoveNode: Failed to remove parameter blocks for node id %d", nodeit->first);
-    }
     nodes_->erase(nodeit);
-  }
-  else
-  {
-    ROS_ERROR("RemoveNode: Failed to find node matching id %i", (int)id);
   }
 }
 

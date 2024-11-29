@@ -18,6 +18,7 @@
 #include <ceres/local_parameterization.h>
 #include <cmath>
 #include <math.h>
+#include <set>
 
 #include "../include/slam_toolbox/toolbox_types.hpp"
 #include "ceres_utils.h"
@@ -27,8 +28,18 @@ namespace solver_plugins
 
 using namespace ::toolbox_types;
 
+inline Eigen::Matrix3d ConvertToEigenMatrix(const karto::Matrix3& matrix)
+{
+    Eigen::Matrix3d eigen_matrix;
+    eigen_matrix << matrix(0,0), matrix(0,1), matrix(0,2),
+                   matrix(1,0), matrix(1,1), matrix(1,2),
+                   matrix(2,0), matrix(2,1), matrix(2,2);
+    return eigen_matrix;
+}
+
 class CeresSolver : public karto::ScanSolver
 {
+
 public:
   CeresSolver();
   virtual ~CeresSolver();
@@ -48,9 +59,16 @@ public:
   virtual void ModifyNode(const int& unique_id, Eigen::Vector3d pose); // change a node's pose
   virtual void GetNodeOrientation(const int& unique_id, double& pose); // get a node's current pose yaw
 
+  void AddInterpolationConstraints(int source_id, int target_id);
+
 private:
   // karto
   karto::ScanSolver::IdPoseVector corrections_;
+  
+  // gps
+  std::set<int> nodes_with_gps_;
+  double gps_factor_weight_;
+  double interpolation_factor_;
 
   // ceres
   ceres::Solver::Options options_;
@@ -66,7 +84,6 @@ private:
   std::unordered_map<int, Eigen::Vector3d>::iterator first_node_;
   boost::mutex nodes_mutex_;
 };
-
 }
 
 #endif

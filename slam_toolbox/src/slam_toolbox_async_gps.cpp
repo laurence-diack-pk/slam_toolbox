@@ -5,7 +5,12 @@ namespace slam_toolbox
 
 /*****************************************************************************/
 AsynchronousGPSSlamToolbox::AsynchronousGPSSlamToolbox(ros::NodeHandle& nh)
-    : SlamToolbox(nh), pose_count_(0), received_first_gps_(false), first_scan_processed_(false), has_global_odom_(false)
+    : SlamToolbox(nh), 
+    pose_count_(0), 
+    received_first_gps_(false), 
+    first_scan_processed_(false), 
+    has_global_odom_(false), 
+    gps_manager_(std::make_unique<GPSEstimationManager>())
 /*****************************************************************************/
 {
     // Get parameters
@@ -95,7 +100,7 @@ void AsynchronousGPSSlamToolbox::laserCallback(
     }
 
     // Find matching absolute pose if needed
-    karto::GPSMeasurement gps;
+    karto::PointGps gps;
     bool has_gps = false;
 
     // Always try to get GPS for the first scan
@@ -103,49 +108,25 @@ void AsynchronousGPSSlamToolbox::laserCallback(
     {
         boost::mutex::scoped_lock lock(buffer_mutex_);
         // Find closest timestamp match in buffer
-        for (const auto& abs_pose : absolute_pose_buffer_)
+        
+        double time_diff = std::abs(
+                (scan->header.stamp - latest_global_odom_.header.stamp).toSec());
+        if (time_diff < sync_threshold_)
         {
-            double time_diff = std::abs(
-                    (scan->header.stamp - abs_pose->header.stamp).toSec());
-            if (time_diff < sync_threshold_)
+            // Combine position and orientation covariances into one 3x3 matrix
+            Eigen::Matrix<double, 6, 6> cov;
+            cov.setZero();
+
+            // set covariance from latest_global_odom_?
+            
+            // Now validate the combined covariance
+            if (isValidCovariance(latest_global_odom_.pose.covariance))
             {
-                // Combine position and orientation covariances into one 3x3 matrix
-                Eigen::Matrix<double, 6, 6> combined_cov;
-                combined_cov.setZero();
-
-                // Copy XY block from absolute pose
-                combined_cov.block<2, 2>(0, 0) << abs_pose->pose.covariance[0], abs_pose->pose.covariance[1],
-                        abs_pose->pose.covariance[6], abs_pose->pose.covariance[7];
-
-                // Copy yaw variance from odometry
-                combined_cov(5, 5) = latest_global_odom_.pose.covariance[35];
-
-                // Now validate the combined covariance
-                if (isValidCovariance(combined_cov))
-                {
-                    // If valid, assign to GPS measurement
-                    gps.covariance << combined_cov(0, 0), combined_cov(0, 1), 0.0,
-                            combined_cov(1, 0), combined_cov(1, 1), 0.0,
-                            0.0, 0.0, combined_cov(5, 5);
-
-                    gps.x = abs_pose->pose.pose.position.x;
-                    gps.y = abs_pose->pose.pose.position.y;
-                    gps.heading = tf2::getYaw(latest_global_odom_.pose.pose.orientation);
-                    gps.valid = true;
-                    has_gps = true;
-
-                    ROS_DEBUG("Found valid GPS measurement: (%.2f, %.2f) with odom heading: %.2f, time diff: %.3f",
-                              gps.x, gps.y, gps.heading, time_diff);
-                    break;
-                }
+                gps.SetX(latest_global_odom_.pose.pose.position.x);
+                gps.SetY(latest_global_odom_.pose.pose.position.y);
+                gps.SetYaw(tf2::getYaw(latest_global_odom_.pose.pose.orientation) + M_PI);
+                has_gps = true;
             }
-        }
-
-        // Clear old messages from buffer
-        while (!absolute_pose_buffer_.empty() &&
-               (scan->header.stamp - absolute_pose_buffer_.front()->header.stamp).toSec() > 1.0)
-        {
-            absolute_pose_buffer_.pop_front();
         }
 
         // If this is supposed to be the first scan but we don't have GPS, wait
@@ -181,7 +162,7 @@ karto::LocalizedRangeScan* AsynchronousGPSSlamToolbox::addGpsScan(
         karto::LaserRangeFinder* laser,
         const sensor_msgs::LaserScan::ConstPtr& scan,
         karto::Pose2& odom_pose,
-        const karto::GPSMeasurement* gps)
+        const karto::PointGps* gps)
 /*****************************************************************************/
 {
     // get our localized range scan
@@ -215,23 +196,11 @@ karto::LocalizedRangeScan* AsynchronousGPSSlamToolbox::addGpsScan(
     }
     else if (processor_type_ == PROCESS)
     {
-        processed = smapper_->getMapper()->Process(range_scan, &covariance, gps);
-    }
-    else if (processor_type_ == PROCESS_NEAR_REGION)
-    {
-        boost::mutex::scoped_lock l(pose_mutex_);
-        if (!process_near_pose_)
+        if (gps)
         {
-            ROS_ERROR("Process near region called without a valid region request. Ignoring scan.");
-            return nullptr;
+            range_scan->SetGpsReading(*gps);
         }
-        range_scan->SetOdometricPose(*process_near_pose_);
-        range_scan->SetCorrectedPose(range_scan->GetOdometricPose());
-        process_near_pose_.reset(nullptr);
-        processed = smapper_->getMapper()->ProcessAgainstNodesNearBy(
-                range_scan, false, &covariance);
-        update_reprocessing_transform = true;
-        processor_type_ = PROCESS;
+        processed = smapper_->getMapper()->Process(range_scan, &covariance);
     }
     else
     {
@@ -270,14 +239,14 @@ karto::LocalizedRangeScan* AsynchronousGPSSlamToolbox::addGpsScan(
 
 /*****************************************************************************/
 bool AsynchronousGPSSlamToolbox::isValidCovariance(
-        Eigen::Matrix<double, 6, 6>& cov)
+        boost::array<double, 36> cov)
 /*****************************************************************************/
 {
     // Check if position covariance is below threshold
     // Covariance is in row-major order, indices 0 and 7 are x and y variances
-    return (std::sqrt(cov(0)) < DEFAULT_COVARIANCE_THRESHOLD &&
-            std::sqrt(cov(7)) < DEFAULT_COVARIANCE_THRESHOLD &&
-            std::sqrt(cov(35)) < DEFAULT_COVARIANCE_THRESHOLD);
+    return (std::sqrt(cov[0]) < DEFAULT_COVARIANCE_THRESHOLD &&
+            std::sqrt(cov[7]) < DEFAULT_COVARIANCE_THRESHOLD &&
+            std::sqrt(cov[35]) < DEFAULT_COVARIANCE_THRESHOLD);
 }
 
 /*****************************************************************************/

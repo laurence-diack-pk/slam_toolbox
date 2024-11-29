@@ -45,7 +45,6 @@ struct PosedScan
   }
   sensor_msgs::LaserScan::ConstPtr scan;
   karto::Pose2 pose;
-  karto::GPSMeasurement gps;  // Add GPS measurement to PosedScan
 };
 
 // object containing a vertex pointer and an updated score

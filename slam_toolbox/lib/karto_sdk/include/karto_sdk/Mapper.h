@@ -1995,7 +1995,7 @@ namespace karto
     virtual kt_bool Process(LocalizedRangeScan* pScan, Matrix3* covariance);
     
     // New overload with GPS data
-    virtual kt_bool Process(LocalizedRangeScan* pScan, Matrix3* covariance, const GPSMeasurement* gps);
+    // virtual kt_bool Process(LocalizedRangeScan* pScan, Matrix3* covariance, const karto::PointGps* gps);
 
 
     /**

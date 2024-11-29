@@ -32,6 +32,40 @@
 namespace slam_toolbox
 {
 
+
+class GPSEstimationManager : public karto::AbstractGpsEstimationManager
+{
+public:
+    GPSEstimationManager() {}
+    ~GPSEstimationManager() {}
+
+    // Store GPS estimates for each scan
+    std::map<const karto::LocalizedRangeScan*, karto::PointGps> gps_estimates_;
+    std::map<const karto::LocalizedRangeScan*, bool> valid_estimates_;
+
+    karto::PointGps GetGpsEstimate(const karto::LocalizedRangeScan* pScan) const override
+    {
+        auto it = gps_estimates_.find(pScan);
+        if (it != gps_estimates_.end())
+        {
+            return it->second;
+        }
+        return karto::PointGps(); // return default if not found
+    }
+
+    void SetGpsEstimate(const karto::LocalizedRangeScan* pScan, const karto::PointGps& rGpsEstimate) override
+    {
+        gps_estimates_[pScan] = rGpsEstimate;
+        valid_estimates_[pScan] = true;
+    }
+
+    kt_bool IsGpsEstimateValid(const karto::LocalizedRangeScan* pScan) const override
+    {
+        auto it = valid_estimates_.find(pScan);
+        return (it != valid_estimates_.end() && it->second);
+    }
+};
+
 class AsynchronousGPSSlamToolbox : public SlamToolbox
 {
 public:
@@ -43,17 +77,18 @@ protected:
   virtual bool deserializePoseGraphCallback(
     slam_toolbox_msgs::DeserializePoseGraph::Request& req,
     slam_toolbox_msgs::DeserializePoseGraph::Response& resp) override final;
+  std::unique_ptr<GPSEstimationManager> gps_manager_;
 
 private:
   void absolutePoseCallback(const nav_msgs::Odometry::ConstPtr& msg);
   void globalOdomCallback(const nav_msgs::Odometry::ConstPtr& msg);  
   bool shouldProcessAbsolutePose();
-  bool isValidCovariance(Eigen::Matrix<double, 6, 6>& cov);
+  bool isValidCovariance(boost::array<double, 36> cov);
   karto::LocalizedRangeScan* addGpsScan(
     karto::LaserRangeFinder* laser,
     const sensor_msgs::LaserScan::ConstPtr& scan,
     karto::Pose2& pose,
-    const karto::GPSMeasurement* gps);
+    const karto::PointGps* gps);
   
   // Subscribers
   ros::Subscriber absolute_pose_sub_, global_odom_sub_;

@@ -101,3 +101,64 @@ class PoseGraph2dErrorTerm
   const Eigen::Matrix3d sqrt_information_;
 };
 
+class GPSPoseErrorTerm
+{
+public:
+    GPSPoseErrorTerm(
+        double x_gps, double y_gps, double yaw_gps,
+        const Eigen::Matrix3d& sqrt_information)
+        : p_gps_(x_gps, y_gps),
+          yaw_gps_(yaw_gps),
+          sqrt_information_(sqrt_information)
+    {
+    }
+
+    template<typename T>
+    bool operator()(
+        const T* const x, const T* const y, const T* const yaw,
+        T* residuals) const
+    {
+        // Position error
+        residuals[0] = *x - T(p_gps_.x());
+        residuals[1] = *y - T(p_gps_.y());
+        // Heading error with angle normalization
+        residuals[2] = NormalizeAngle(*yaw - T(yaw_gps_));
+
+        // Scale by the full information matrix
+        Eigen::Map<Eigen::Matrix<T, 3, 1>> residuals_map(residuals);
+        residuals_map = sqrt_information_.template cast<T>() * residuals_map;
+        return true;
+    }
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+private:
+    const Eigen::Vector2d p_gps_;
+    const double yaw_gps_;
+    const Eigen::Matrix3d sqrt_information_;
+};
+
+struct InterpolationErrorTerm {
+    InterpolationErrorTerm(double t, double weight)
+        : t_(t), weight_(weight) {}
+
+    template <typename T>
+    bool operator()(const T* const p1_x, const T* const p1_y, const T* const p1_theta,
+                   const T* const p2_x, const T* const p2_y, const T* const p2_theta,
+                   T* residuals) const {
+        // Linear interpolation between poses
+        residuals[0] = weight_ * ((*p2_x) - ((*p1_x) * (T(1.0) - t_) + (*p2_x) * t_));
+        residuals[1] = weight_ * ((*p2_y) - ((*p1_y) * (T(1.0) - t_) + (*p2_y) * t_));
+        residuals[2] = weight_ * ((*p2_theta) - ((*p1_theta) * (T(1.0) - t_) + (*p2_theta) * t_));
+        return true;
+    }
+
+    static ceres::CostFunction* Create(double t, double weight) {
+        return new ceres::AutoDiffCostFunction<InterpolationErrorTerm, 3, 1, 1, 1, 1, 1, 1>(
+            new InterpolationErrorTerm(t, weight));
+    }
+
+private:
+    const double t_;      // Interpolation factor (0 to 1)
+    const double weight_; // Weight of the interpolation constraint
+};
