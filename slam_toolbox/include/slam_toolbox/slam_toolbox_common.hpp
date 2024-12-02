@@ -26,6 +26,7 @@
 #include "tf2_ros/message_filter.h"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
+#include "nav_msgs/Odometry.h"
 
 #include "pluginlib/class_loader.h"
 
@@ -114,7 +115,7 @@ protected:
   std::unique_ptr<tf2_ros::TransformBroadcaster> tfB_;
   std::unique_ptr<message_filters::Subscriber<sensor_msgs::LaserScan> > scan_filter_sub_;
   std::unique_ptr<tf2_ros::MessageFilter<sensor_msgs::LaserScan> > scan_filter_;
-  ros::Publisher sst_, sstm_, pose_pub_;
+  ros::Publisher sst_, sstm_, pose_pub_, odom_pub_;
   ros::ServiceServer ssMap_, ssPauseMeasurements_, ssSerialize_, ssDesserialize_, ssReset_;
 
   // Storage for ROS parameters
@@ -125,7 +126,7 @@ protected:
   double resolution_;
   double position_covariance_scale_;
   double yaw_covariance_scale_;
-  bool first_measurement_, enable_interactive_mode_;
+  bool first_measurement_, enable_interactive_mode_, pub_odom_msg_;
 
   // Book keeping
   std::unique_ptr<mapper_utils::SMapper> smapper_;

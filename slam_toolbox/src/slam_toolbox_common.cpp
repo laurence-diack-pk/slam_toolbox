@@ -117,6 +117,7 @@ void SlamToolbox::setParams(ros::NodeHandle& private_nh)
   private_nh.param("scan_topic", scan_topic_, std::string("/scan"));
   private_nh.param("throttle_scans", throttle_scans_, 1);
   private_nh.param("enable_interactive_mode", enable_interactive_mode_, false);
+  private_nh.param("pub_odom_msg", pub_odom_msg_, false);
 
   double tmp_val;
   private_nh.param("transform_timeout", tmp_val, 0.2);
@@ -160,7 +161,10 @@ void SlamToolbox::setROSInterfaces(ros::NodeHandle& node)
   scan_filter_sub_ = std::make_unique<message_filters::Subscriber<sensor_msgs::LaserScan> >(node, scan_topic_, 5);
   scan_filter_ = std::make_unique<tf2_ros::MessageFilter<sensor_msgs::LaserScan> >(*scan_filter_sub_, *tf_, odom_frame_, 5, node);
   scan_filter_->registerCallback(boost::bind(&SlamToolbox::laserCallback, this, _1));
-  pose_pub_ = node.advertise<geometry_msgs::PoseWithCovarianceStamped>("pose", 10, true);
+  std::string pose_topic;
+  node.param("pose_topic", pose_topic, std::string("/slam/pose"));
+  pose_pub_ = node.advertise<geometry_msgs::PoseWithCovarianceStamped>(pose_topic, 10, true);
+  odom_pub_ = node.advertise<nav_msgs::Odometry>("/odometry/slam", 10, true);
 }
 
 /*****************************************************************************/
@@ -548,27 +552,54 @@ karto::LocalizedRangeScan* SlamToolbox::addScan(
 
 /*****************************************************************************/
 void SlamToolbox::publishPose(
-  const karto::Pose2 & pose,
-  const karto::Matrix3 & cov,
-  const ros::Time & t)
+    const karto::Pose2 & pose,
+    const karto::Matrix3 & cov,
+    const ros::Time & t)
 /*****************************************************************************/
 {
-  geometry_msgs::PoseWithCovarianceStamped pose_msg;
-  pose_msg.header.stamp = t;
-  pose_msg.header.frame_id = map_frame_;
+    // Create and publish PoseWithCovarianceStamped message
+    geometry_msgs::PoseWithCovarianceStamped pose_msg;
+    pose_msg.header.stamp = t;
+    pose_msg.header.frame_id = map_frame_;
 
-  tf2::Quaternion q(0., 0., 0., 1.0);
-  q.setRPY(0., 0., pose.GetHeading());
-  tf2::Transform transform(q, tf2::Vector3(pose.GetX(), pose.GetY(), 0.0));
-  tf2::toMsg(transform, pose_msg.pose.pose);
+    // Create quaternion for orientation
+    tf2::Quaternion q(0., 0., 0., 1.0);
+    q.setRPY(0., 0., pose.GetHeading());
+    tf2::Transform transform(q, tf2::Vector3(pose.GetX(), pose.GetY(), 0.0));
+    
+    // Convert transform to pose message
+    tf2::toMsg(transform, pose_msg.pose.pose);
 
-  pose_msg.pose.covariance[0] = cov(0, 0) * position_covariance_scale_;  // x
-  pose_msg.pose.covariance[1] = cov(0, 1) * position_covariance_scale_;  // xy
-  pose_msg.pose.covariance[6] = cov(1, 0) * position_covariance_scale_;  // xy
-  pose_msg.pose.covariance[7] = cov(1, 1) * position_covariance_scale_;  // y
-  pose_msg.pose.covariance[35] = cov(2, 2) * yaw_covariance_scale_;      // yaw
+    // Fill in covariance matrix
+    pose_msg.pose.covariance[0] = cov(0, 0) * position_covariance_scale_;  // x
+    pose_msg.pose.covariance[1] = cov(0, 1) * position_covariance_scale_;  // xy
+    pose_msg.pose.covariance[6] = cov(1, 0) * position_covariance_scale_;  // xy
+    pose_msg.pose.covariance[7] = cov(1, 1) * position_covariance_scale_;  // y
+    pose_msg.pose.covariance[35] = cov(2, 2) * yaw_covariance_scale_;     // yaw
 
-  pose_pub_.publish(pose_msg);
+    // Publish pose message
+    pose_pub_.publish(pose_msg);
+
+    // Optionally publish as Odometry message
+    if (pub_odom_msg_) {
+        nav_msgs::Odometry odom_msg;
+        
+        // Copy header information
+        odom_msg.header = pose_msg.header;
+        odom_msg.child_frame_id = base_frame_;  // Or configure as needed
+        
+        // Copy pose information
+        odom_msg.pose = pose_msg.pose;
+        
+        // Initialize twist with zeros since SLAM typically doesn't provide velocity
+        odom_msg.twist.covariance.fill(0.0);
+        for (size_t i = 0; i < 36; ++i) {
+            odom_msg.twist.covariance[i] = (i % 7 == 0) ? 1e-6 : 0.0;  // Small non-zero values on diagonal
+        }
+        
+        // Publish odometry message
+        odom_pub_.publish(odom_msg);
+    }
 }
 
 /*****************************************************************************/
